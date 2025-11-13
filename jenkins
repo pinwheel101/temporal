@@ -1,0 +1,115 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    jenkins: agent
+spec:
+  containers:
+  # Jenkins JNLP Agent (필수)
+  - name: jnlp
+    image: jenkins/inbound-agent:latest
+    args: ['\$(JENKINS_SECRET)', '\$(JENKINS_NAME)']
+    
+  # Git 작업을 위한 컨테이너
+  - name: git
+    image: alpine/git:latest
+    command:
+    - cat
+    tty: true
+    
+  # Docker 빌드를 위한 컨테이너
+  - name: docker
+    image: docker:24-dind
+    securityContext:
+      privileged: true
+    volumeMounts:
+    - name: docker-sock
+      mountPath: /var/run/docker.sock
+      
+  volumes:
+  - name: docker-sock
+    hostPath:
+      path: /var/run/docker.sock
+"""
+        }
+    }
+    
+    parameters {
+        string(name: 'BRANCH_NAME', defaultValue: 'main', description: '빌드할 브랜치')
+        string(name: 'DOCKERFILE_PATH', defaultValue: 'apache/airflow/3.1.1/Dockerfile', description: 'Dockerfile 경로')
+    }
+    
+    environment {
+        NEXUS_REGISTRY = 'nexus.your-company.com:8082'
+        NEXUS_CREDENTIALS_ID = 'nexus-docker-credentials'
+        BITBUCKET_CREDENTIALS_ID = 'bitbucket-credentials'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                container('git') {  // git 컨테이너에서 실행
+                    git branch: "${params.BRANCH_NAME}",
+                        credentialsId: "${BITBUCKET_CREDENTIALS_ID}",
+                        url: 'https://bitbucket.org/your-org/your-repo.git'
+                    
+                    sh 'ls -la'
+                }
+            }
+        }
+        
+        stage('Build and Push Docker Image') {
+            steps {
+                container('docker') {  // docker 컨테이너에서 실행
+                    script {
+                        def dockerfilePath = params.DOCKERFILE_PATH
+                        def pathParts = dockerfilePath.split('/')
+                        def imageName = pathParts[0] + '/' + pathParts[1]
+                        def imageVersion = pathParts[2]
+                        def branchTag = params.BRANCH_NAME.replaceAll('/', '-')
+                        def fullImageTag = "${NEXUS_REGISTRY}/${imageName}:${imageVersion}-${branchTag}"
+                        
+                        // Nexus 로그인
+                        withCredentials([usernamePassword(
+                            credentialsId: "${NEXUS_CREDENTIALS_ID}",
+                            usernameVariable: 'NEXUS_USER',
+                            passwordVariable: 'NEXUS_PASS'
+                        )]) {
+                            sh """
+                                echo "Building image: ${fullImageTag}"
+                                
+                                # Docker 로그인
+                                echo \${NEXUS_PASS} | docker login ${NEXUS_REGISTRY} -u \${NEXUS_USER} --password-stdin
+                                
+                                # 이미지 빌드
+                                docker build -t ${fullImageTag} -f ${dockerfilePath} .
+                                
+                                # Nexus로 푸시
+                                docker push ${fullImageTag}
+                                
+                                # latest 태그 추가 및 푸시
+                                docker tag ${fullImageTag} ${NEXUS_REGISTRY}/${imageName}:latest
+                                docker push ${NEXUS_REGISTRY}/${imageName}:latest
+                                
+                                # 로그아웃
+                                docker logout ${NEXUS_REGISTRY}
+                                
+                                echo "✅ Image pushed successfully"
+                            """
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            cleanWs()
+        }
+    }
+}
