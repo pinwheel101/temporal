@@ -9,31 +9,30 @@ metadata:
     jenkins: agent
 spec:
   containers:
-  # Jenkins JNLP Agent (필수)
-  - name: jnlp
-    image: jenkins/inbound-agent:latest
-    args: ['\$(JENKINS_SECRET)', '\$(JENKINS_NAME)']
-    
-  # Git 작업을 위한 컨테이너
+  # Git 체크아웃용
   - name: git
-    image: alpine/git:latest
+    image: nexus.your-company.com:8082/alpine/git:latest
     command:
     - cat
     tty: true
     
-  # Docker 빌드를 위한 컨테이너
-  - name: docker
-    image: docker:24-dind
-    securityContext:
-      privileged: true
+  # Kaniko 빌드용
+  - name: kaniko
+    image: nexus.your-company.com:8082/kaniko-project/executor:debug
+    command:
+    - /busybox/cat
+    tty: true
     volumeMounts:
-    - name: docker-sock
-      mountPath: /var/run/docker.sock
+    - name: docker-config
+      mountPath: /kaniko/.docker/
       
   volumes:
-  - name: docker-sock
-    hostPath:
-      path: /var/run/docker.sock
+  - name: docker-config
+    secret:
+      secretName: nexus-docker-config
+      items:
+      - key: .dockerconfigjson
+        path: config.json
 """
         }
     }
@@ -45,62 +44,56 @@ spec:
     
     environment {
         NEXUS_REGISTRY = 'nexus.your-company.com:8082'
-        NEXUS_CREDENTIALS_ID = 'nexus-docker-credentials'
-        BITBUCKET_CREDENTIALS_ID = 'bitbucket-credentials'
     }
     
     stages {
         stage('Checkout') {
             steps {
-                container('git') {  // git 컨테이너에서 실행
+                container('git') {
                     git branch: "${params.BRANCH_NAME}",
-                        credentialsId: "${BITBUCKET_CREDENTIALS_ID}",
+                        credentialsId: 'bitbucket-credentials',
                         url: 'https://bitbucket.org/your-org/your-repo.git'
                     
-                    sh 'ls -la'
+                    sh """
+                        echo "✅ Checked out branch: ${params.BRANCH_NAME}"
+                        ls -la ${params.DOCKERFILE_PATH}
+                    """
                 }
             }
         }
         
-        stage('Build and Push Docker Image') {
+        stage('Build and Push') {
             steps {
-                container('docker') {  // docker 컨테이너에서 실행
+                container('kaniko') {
                     script {
+                        // 이미지 정보 파싱
                         def dockerfilePath = params.DOCKERFILE_PATH
                         def pathParts = dockerfilePath.split('/')
-                        def imageName = pathParts[0] + '/' + pathParts[1]
-                        def imageVersion = pathParts[2]
+                        def imageName = "${pathParts[0]}/${pathParts[1]}"  // apache/airflow
+                        def imageVersion = pathParts[2]  // 3.1.1
                         def branchTag = params.BRANCH_NAME.replaceAll('/', '-')
-                        def fullImageTag = "${NEXUS_REGISTRY}/${imageName}:${imageVersion}-${branchTag}"
                         
-                        // Nexus 로그인
-                        withCredentials([usernamePassword(
-                            credentialsId: "${NEXUS_CREDENTIALS_ID}",
-                            usernameVariable: 'NEXUS_USER',
-                            passwordVariable: 'NEXUS_PASS'
-                        )]) {
-                            sh """
-                                echo "Building image: ${fullImageTag}"
-                                
-                                # Docker 로그인
-                                echo \${NEXUS_PASS} | docker login ${NEXUS_REGISTRY} -u \${NEXUS_USER} --password-stdin
-                                
-                                # 이미지 빌드
-                                docker build -t ${fullImageTag} -f ${dockerfilePath} .
-                                
-                                # Nexus로 푸시
-                                docker push ${fullImageTag}
-                                
-                                # latest 태그 추가 및 푸시
-                                docker tag ${fullImageTag} ${NEXUS_REGISTRY}/${imageName}:latest
-                                docker push ${NEXUS_REGISTRY}/${imageName}:latest
-                                
-                                # 로그아웃
-                                docker logout ${NEXUS_REGISTRY}
-                                
-                                echo "✅ Image pushed successfully"
-                            """
-                        }
+                        // 빌드 컨텍스트 디렉토리 (Dockerfile이 있는 디렉토리)
+                        def dockerfileDir = dockerfilePath.substring(0, dockerfilePath.lastIndexOf('/'))
+                        
+                        echo "Building: ${NEXUS_REGISTRY}/${imageName}:${imageVersion}-${branchTag}"
+                        
+                        sh """
+                            /kaniko/executor \
+                              --context=\${WORKSPACE}/${dockerfileDir} \
+                              --dockerfile=\${WORKSPACE}/${dockerfilePath} \
+                              --destination=${NEXUS_REGISTRY}/${imageName}:${imageVersion}-${branchTag} \
+                              --destination=${NEXUS_REGISTRY}/${imageName}:latest \
+                              --cache=true \
+                              --cache-repo=${NEXUS_REGISTRY}/${imageName}/cache \
+                              --skip-tls-verify \
+                              --registry-mirror=${NEXUS_REGISTRY} \
+                              --insecure-registry=${NEXUS_REGISTRY}
+                        """
+                        
+                        echo "✅ Image pushed successfully!"
+                        echo "   - ${NEXUS_REGISTRY}/${imageName}:${imageVersion}-${branchTag}"
+                        echo "   - ${NEXUS_REGISTRY}/${imageName}:latest"
                     }
                 }
             }
@@ -108,6 +101,12 @@ spec:
     }
     
     post {
+        success {
+            echo "🎉 Pipeline completed successfully!"
+        }
+        failure {
+            echo "❌ Pipeline failed!"
+        }
         always {
             cleanWs()
         }
