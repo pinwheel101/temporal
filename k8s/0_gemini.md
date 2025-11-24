@@ -1076,3 +1076,144 @@ Isilon은 iSCSI나 FC(Fibre Channel)처럼 전용 케이블이 필요한 게 아
 
 >>>
 
+카오스 엔지니어링 테스트 방법
+
+>>>
+
+191대 규모의 온프레미스 클러스터에서 카오스 엔지니어링을 시작하는 것은 매우 훌륭한 전략입니다. 하드웨어가 많을수록 \*\*"장애는 예외가 아니라 일상"\*\*이기 때문입니다.
+
+현재 구축하신 환경(Spark/Trino, NVMe, Isilon, 외부 MinIO)에 맞춰, **안전하게 시작하여 점진적으로 강도를 높이는 4단계 로드맵**을 제안해 드립니다.
+
+-----
+
+### 1\. 도구 선정: Chaos Mesh (추천)
+
+온프레미스 쿠버네티스 환경에서 가장 추천하는 도구는 \*\*[Chaos Mesh](https://chaos-mesh.org/)\*\*입니다.
+
+  * **선정 이유:**
+    1.  **CNCF 졸업 프로젝트:** 안정성이 검증됨.
+    2.  **강력한 Web UI:** YAML을 몰라도 대시보드에서 실험을 설계하고 관제 가능.
+    3.  **JVM 지원:** Spark, Trino가 Java 기반인데, Chaos Mesh는 JVM 메서드 단위의 지연/예외 주입이 가능합니다.
+    4.  **Network Chaos:** Cilium 환경에서도 Pod 간 네트워크 지연/손실 시뮬레이션이 탁월합니다.
+
+-----
+
+### 2\. 단계별 적용 로드맵
+
+카오스 엔지니어링은 \*\*"운영 환경을 부수는 것"이 아니라 "시스템의 견고함을 검증하는 것"\*\*입니다. 반드시 `Development` 또는 `Staging` 네임스페이스에서 시작하세요.
+
+#### Phase 1: Pod Chaos (가장 기초적이고 안전한 단계)
+
+**목표:** Spark Executor나 Trino Worker가 죽었을 때, 작업이 재시도(Retry)되거나 전체 클러스터가 죽지 않는지 확인.
+
+  * **실험 대상:** `Spark-Worker` Pod, `Trino-Worker` Pod.
+  * **시나리오:** "Pod Kill" (무작위로 파드 1\~2개를 강제 종료).
+  * **검증 포인트:**
+      * Spark Operator가 즉시 새로운 Executor Pod를 띄우는가?
+      * 실행 중이던 Spark Job이 실패하지 않고, 해당 Task만 다른 노드로 옮겨가서 성공하는가?
+      * Trino Coordinator가 죽은 Worker를 제외하고 쿼리를 처리하는가?
+
+#### Phase 2: Network Chaos (데이터 파이프라인 핵심)
+
+**목표:** 외부 MinIO와의 연결이 불안정할 때 애플리케이션의 타임아웃 설정이 적절한지 확인.
+
+  * **실험 대상:** Spark Driver/Executor, Trino Worker.
+  * **시나리오:**
+    1.  **Latency Injection:** 외부 MinIO IP 대역으로 가는 패킷에 **latency 50ms \~ 100ms** 추가.
+    2.  **Packet Loss:** 패킷의 **1\~5% 유실** 시뮬레이션.
+  * **검증 포인트:**
+      * Spark Shuffle 시 네트워크 지연이 발생했을 때 전체 Job이 멈추지 않는가? (Netty 타임아웃 설정 검증)
+      * 외부 데이터 소스(MinIO) 조회 시, 재시도(Retry) 로직이 동작하는가, 아니면 바로 에러를 뱉고 죽는가?
+
+#### Phase 3: IO Chaos (NVMe 및 Isilon 검증)
+
+**목표:** 디스크 I/O 병목 시뮬레이션.
+
+  * **실험 대상:** Local PV를 사용하는 Pod.
+  * **시나리오:**
+      * **IO Delay:** 파일 읽기/쓰기에 인위적인 지연 추가.
+      * **IO Error:** 특정 파일 접근 시 IO 에러 리턴.
+  * **검증 포인트:**
+      * Isilon(NFS) 응답이 느려졌을 때, Jenkins나 Airflow가 좀비 상태(Stuck)에 빠지지 않는가?
+      * NVMe I/O 지연 시 Spark의 Spill 동작이 어떻게 반응하는가?
+
+#### Phase 4: Node Chaos (운영자 레벨)
+
+**목표:** 물리 노드 장애(전원 차단, 커널 패닉) 대응.
+
+  * **실험 대상:** Worker Node 1대.
+  * **시나리오:** `Node Drain` 또는 Chaos Mesh의 `KernelChaos` 활용.
+  * **검증 포인트:**
+      * Isilon 마운트가 끊긴 노드에서 실행되던 Pod들이 다른 노드로 안전하게 이사(Eviction) 가는가?
+      * Cilium BGP가 죽은 노드를 라우팅 테이블에서 즉시 제외하는가?
+
+-----
+
+### 3\. 실전 예시 (YAML)
+
+Chaos Mesh를 설치(`helm install chaos-mesh ...`)한 후, 아래와 같은 YAML을 적용하여 테스트를 시작합니다.
+
+**예시 1: Spark Executor 2개를 5분마다 죽이기 (PodChaos)**
+
+```yaml
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: spark-executor-kill
+  namespace: team-a-spark
+spec:
+  action: pod-kill
+  mode: fixed
+  value: "2" # 한 번에 2개씩 죽임
+  selector:
+    labelSelectors:
+      "spark-role": "executor" # 타겟 라벨
+  scheduler:
+    cron: "*/5 * * * *" # 5분마다 실행
+```
+
+**예시 2: MinIO 연결 지연 시뮬레이션 (NetworkChaos)**
+
+```yaml
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: minio-latency
+  namespace: team-a-trino
+spec:
+  action: delay
+  mode: all
+  selector:
+    labelSelectors:
+      "app": "trino-worker"
+  delay:
+    latency: "100ms"
+    correlation: "100"
+    jitter: "0ms"
+  direction: to
+  target:
+    mode: ip
+    value: "10.x.x.x/32" # 외부 MinIO IP
+```
+
+-----
+
+### 4\. 카오스 엔지니어링 수행 원칙 (게임 데이)
+
+시스템만 설치한다고 끝이 아닙니다. \*\*"Game Day(게임 데이)"\*\*라는 이벤트를 만들어 팀원들과 함께 관측해야 합니다.
+
+1.  **가설 수립:** "Trino Worker 하나가 죽어도, 실행 중인 쿼리는 약간 느려질 뿐 실패하지 않을 것이다."
+2.  **실험 실행:** Chaos Mesh로 Worker 하나를 Kill.
+3.  **관측(Monitoring):** 그라파나 대시보드에서 쿼리 성공률, 레이턴시, 에러 로그 확인.
+4.  **학습 및 개선:** "쿼리가 실패했다면 왜 실패했는가? Trino의 `fault-tolerant-execution` 설정이 꺼져 있었는가?" -\> **설정 수정 후 재테스트.**
+
+### [요약] 시작 가이드
+
+1.  **설치:** **Chaos Mesh**를 Helm으로 설치하십시오.
+2.  **첫 실험:** 개발용 Namespace에서 **Spark Executor Pod 하나를 죽이는 것**부터 시작하십시오.
+3.  **확장:** 외부 **MinIO 네트워크 지연** 테스트로 넘어가십시오. (가장 장애가 많이 나는 구간입니다)
+
+이 과정을 통해 구축하신 191대 클러스터의 신뢰성을 증명할 수 있습니다.
+
+>>>
+
