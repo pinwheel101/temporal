@@ -1,0 +1,98 @@
+Cilium은 단순한 CNI(Container Network Interface)를 넘어, 보안 및 관측성(Hubble)을 담당하는 쿠버네티스의 핵심 엔진입니다. 특히 **BGP Native Routing**과 **Kube-proxy Replacement** 기능을 사용하는 경우, 일반적인 CNI보다 훨씬 깊이 있는 검증이 필요합니다.
+
+Cilium 팀에서 제공하는 자동화 도구와 수동 점검 리스트를 결합한 **Cilium 구축 검증 및 테스트 계획서**입니다.
+
+---
+
+# Cilium 구축 검증 및 테스트 계획서
+
+**작성일:** 2025년 00월 00일
+**대상 클러스터:** 온프레미스 K8s (191 Node)
+**테스트 목적:** eBPF 기반 네트워크 통신, BGP 라우팅, L3/L4/L7 정책 적용, Hubble 관측성 정상 동작 검증
+
+---
+
+## 1. 자동화된 연결성 테스트 (Automated Connectivity Test)
+
+Cilium은 자체적으로 클러스터의 모든 네트워크 시나리오를 검증하는 강력한 CLI 도구를 제공합니다. **가장 먼저 이 테스트를 수행**하여 전체적인 건강 상태를 파악하는 것이 좋습니다.
+
+| ID | 테스트 항목 | 점검 방법 (CLI) | 예상 결과 (Expected Result) | 확인 |
+| :--- | :--- | :--- | :--- | :--- |
+| **AUTO-01** | **Cilium Connectivity Test** | `cilium connectivity test` | Pod-to-Pod, Pod-to-Service, Node-to-Pod 등 약 10~20개의 테스트 케이스가 모두 `[OK]`로 통과해야 함. | [ ] |
+| **AUTO-02** | **Cilium Status (Verbose)** | `cilium status --verbose` | KubeProxyReplacement, BGP Control Plane 등의 상태가 `Enabled` 또는 `Strict`로 표시되어야 함. | [ ] |
+
+---
+
+## 2. 인프라 및 BGP 라우팅 점검 (Infrastructure & BGP)
+
+계획하신 **L3 Native Routing (BGP)** 구성이 물리 스위치와 정상적으로 연동되었는지 확인합니다.
+
+| ID | 테스트 항목 | 점검 방법 (CLI) | 예상 결과 (Expected Result) | 확인 |
+| :--- | :--- | :--- | :--- | :--- |
+| **INF-01** | **Agent 상태 점검** | `kubectl get pods -n kube-system -l k8s-app=cilium` | 191대 모든 노드에서 Cilium Agent 파드가 `Running` 및 `Ready` 상태여야 함. | [ ] |
+| **INF-02** | **BGP Peering 상태** | `cilium bgp peers` (특정 파드 내부 또는 노드에서 실행) | 물리 스위치(ToR) IP와의 세션 상태가 `ESTABLISHED`로 보여야 하며, `uptime`이 지속되어야 함. | [ ] |
+| **INF-03** | **라우팅 테이블 확인** | 노드에서 `ip route` 실행 | 타 노드의 Pod CIDR 대역이 터널링 인터페이스(`cilium_vxlan`)가 아닌 물리 인터페이스(예: `bond0`)를 통해 라우팅되어야 함. | [ ] |
+| **INF-04** | **Kube-Proxy 대체 확인** | `kubectl -n kube-system logs ds/cilium | grep "kube-proxy replacement"` | 로그에 "Auto-enabling kube-proxy replacement" 또는 "Strict mode"가 활성화되었다는 메시지가 있어야 함. | [ ] |
+
+---
+
+## 3. 기본 통신 및 서비스 부하 분산 (Basic Networking)
+
+파드 간 통신과 서비스(Service) IP를 통한 로드밸런싱이 eBPF를 통해 잘 처리되는지 확인합니다.
+
+| ID | 테스트 항목 | 테스트 시나리오 | 예상 결과 | 확인 |
+| :--- | :--- | :--- | :--- | :--- |
+| **NET-01** | **Pod 간 통신 (동일 노드)** | Node A에 있는 Pod 1 -> Node A에 있는 Pod 2로 `ping` 또는 `curl`. | 지연 없이 즉시 통신 성공. | [ ] |
+| **NET-02** | **Pod 간 통신 (다른 노드)** | Node A에 있는 Pod 1 -> Node B에 있는 Pod 2로 `ping` 또는 `curl`. | **BGP 라우팅을 타고** 통신 성공. (traceroute 시 홉 수가 물리 네트워크 경로와 일치해야 함) | [ ] |
+| **NET-03** | **Service 부하 분산** | 백엔드 파드가 3개인 Service IP로 반복 요청 (`curl`). | 요청이 3개의 파드로 고르게 분산(Round Robin 등)되어야 함. | [ ] |
+| **NET-04** | **외부 인터넷 통신** | Pod 내부에서 `curl google.com`. | Masquerading(NAT)이 정상 동작하여 응답을 받아와야 함. | [ ] |
+| **NET-05** | **NodePort 접속** | 외부 PC에서 `http://<Node-IP>:<NodePort>` 접속. | 클러스터 외부에서 내부 서비스로 접속이 가능해야 함. | [ ] |
+
+---
+
+## 4. 네트워크 보안 정책 테스트 (Network Policy)
+
+Cilium의 핵심 기능인 **CiliumNetworkPolicy (CNP)**가 트래픽을 정확히 차단/허용하는지 검증합니다.
+
+| ID | 테스트 항목 | 테스트 시나리오 | 예상 결과 | 확인 |
+| :--- | :--- | :--- | :--- | :--- |
+| **SEC-01** | **L3/L4 Deny (기본 차단)** | 테스트용 Namespace에 `default-deny` 정책 적용 후 통신 시도. | 모든 인바운드/아웃바운드 트래픽이 차단(Timeout)되어야 함. | [ ] |
+| **SEC-02** | **L3 Allow (특정 IP 허용)** | 특정 Pod Label(예: `app=frontend`)에서만 `app=backend`로 접속 허용 정책 적용. | 허용된 Pod에서는 접속 성공, 그 외 Pod에서는 접속 실패. | [ ] |
+| **SEC-03** | **L7 Policy (HTTP)** | `GET /public`은 허용하고 `GET /private`은 차단하는 정책 적용. | `/public` 호출은 200 OK, `/private` 호출은 **403 Forbidden** 반환. | [ ] |
+| **SEC-04** | **Host Firewall** | CiliumClusterwideNetworkPolicy로 노드 자체의 SSH 포트 접근 제어 테스트. | 정책에 허용된 IP 외에는 노드 SSH 접속이 차단되어야 함. | [ ] |
+
+---
+
+## 5. 관측성 및 Hubble 테스트 (Observability)
+
+네트워크 흐름을 시각화하고 트러블슈팅할 수 있는 Hubble UI 및 CLI 동작을 확인합니다.
+
+| ID | 테스트 항목 | 점검 방법 | 예상 결과 | 확인 |
+| :--- | :--- | :--- | :--- | :--- |
+| **OBS-01** | **Hubble Relay 상태** | `kubectl get pods -n kube-system -l k8s-app=hubble-relay` | Relay 파드가 `Running` 상태여야 함. | [ ] |
+| **OBS-02** | **Flow 조회 (CLI)** | `hubble observe` | 실시간으로 파드 간 통신 패킷 흐름(Source, Dest, Verdict)이 텍스트로 출력되어야 함. | [ ] |
+| **OBS-03** | **Hubble UI 접속** | Hubble UI 서비스 포트포워딩 후 브라우저 접속. | 서비스 맵(Service Map)이 그려지고, 패킷 드랍(Drop) 시 붉은색 라인이 표시되어야 함. | [ ] |
+| **OBS-04** | **DNS 모니터링** | `hubble observe --type=dns` | 파드에서 수행하는 DNS 질의(Query)와 응답이 실시간으로 보여야 함. | [ ] |
+
+---
+
+## 6. 성능 및 장애 테스트 (Performance & Resilience)
+
+| ID | 테스트 항목 | 테스트 시나리오 | 예상 결과 | 확인 |
+| :--- | :--- | :--- | :--- | :--- |
+| **PFM-01** | **대역폭 측정 (Native)** | `iperf3`를 사용하여 노드 간 대역폭 측정. | Overlay(VXLAN) 대비 오버헤드 없이 NIC 스펙(Bonding 50G)에 근접한 속도가 나와야 함. | [ ] |
+| **PFM-02** | **Agent 재시작** | `kubectl delete pod -n kube-system <cilium-agent-pod>` | Agent가 재시작되는 동안에도 **기존 파드 간 통신은 끊기지 않아야 함** (eBPF 맵 보존 확인). | [ ] |
+| **PFM-03** | **BGP Failover** | ToR 스위치 중 1개 연결 단절 (또는 링크 다운). | BGP 경로가 즉시 남은 스위치 경로로 변경되어 통신 두절이 없어야 함. | [ ] |
+
+---
+
+## 7. 테스트 결과 요약 (Summary)
+
+* **테스트 수행자:** ___________________
+* **수행 일시:** ___________________
+* **성공 항목:** ____ / ____
+* **실패 항목:** ___________________ (Jira 티켓 번호: _____)
+* **최종 판정:** [ ] 운영 이관 가능 / [ ] 보완 필요
+
+
+```
