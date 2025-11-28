@@ -16,41 +16,24 @@ data:
        topic: "$4"
        partition: "$5"
     
-    - pattern: kafka.server<type=(.+), name=(.+), clientId=(.+), brokerHost=(.+), brokerPort=(.+)><>Value
-      name: kafka_server_$1_$2
-      type: GAUGE
-      labels:
-       clientId: "$3"
-       broker: "$4:$5"
-    
     # KRaft Controller metrics
-    - pattern: kafka.controller<type=(.+), name=(.+)><>(Count|Value|Mean|OneMinuteRate|FiveMinuteRate|FifteenMinuteRate)
+    - pattern: kafka.controller<type=(.+), name=(.+)><>(Count|Value|Mean|OneMinuteRate)
       name: kafka_controller_$1_$2
       type: GAUGE
-      labels:
-        aggregate: "$3"
     
     # Network metrics
     - pattern: kafka.network<type=(.+), name=(.+), request=(.+)><>(Count|Mean|OneMinuteRate)
-      name: kafka_network_$1_$2_$4
+      name: kafka_network_$1_$2
       type: GAUGE
       labels:
         request: "$3"
     
-    # Log metrics
-    - pattern: kafka.log<type=(.+), name=(.+), topic=(.+), partition=(.+)><>Value
-      name: kafka_log_$1_$2
-      type: GAUGE
-      labels:
-        topic: "$3"
-        partition: "$4"
-    
-    # Replication metrics
+    # Replication metrics (중요!)
     - pattern: kafka.server<type=ReplicaManager, name=(.+)><>(Value|Mean)
       name: kafka_server_replicamanager_$1
       type: GAUGE
     
-    # Under-replicated partitions (중요!)
+    # Under-Replicated Partitions (가장 중요!)
     - pattern: kafka.server<type=ReplicaManager, name=UnderReplicatedPartitions><>Value
       name: kafka_server_replicamanager_underreplicated_partitions
       type: GAUGE
@@ -63,3 +46,11 @@ data:
     - pattern: kafka.server<type=ReplicaManager, name=IsrExpandsPerSec><>OneMinuteRate
       name: kafka_server_replicamanager_isr_expands_per_sec
       type: GAUGE
+    
+    # Log metrics
+    - pattern: kafka.log<type=(.+), name=(.+), topic=(.+), partition=(.+)><>Value
+      name: kafka_log_$1_$2
+      type: GAUGE
+      labels:
+        topic: "$3"
+        partition: "$4"
