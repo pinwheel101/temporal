@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-metrics
+  namespace: kafka
+data:
+  kafka-metrics-config.yml: |
+    lowercaseOutputName: true
+    rules:
+    # Broker metrics
+    - pattern: kafka.server<type=(.+), name=(.+), clientId=(.+), topic=(.+), partition=(.*)><>Value
+      name: kafka_server_$1_$2
+      type: GAUGE
+      labels:
+       clientId: "$3"
+       topic: "$4"
+       partition: "$5"
+    
+    - pattern: kafka.server<type=(.+), name=(.+), clientId=(.+), brokerHost=(.+), brokerPort=(.+)><>Value
+      name: kafka_server_$1_$2
+      type: GAUGE
+      labels:
+       clientId: "$3"
+       broker: "$4:$5"
+    
+    # KRaft Controller metrics
+    - pattern: kafka.controller<type=(.+), name=(.+)><>(Count|Value|Mean|OneMinuteRate|FiveMinuteRate|FifteenMinuteRate)
+      name: kafka_controller_$1_$2
+      type: GAUGE
+      labels:
+        aggregate: "$3"
+    
+    # Network metrics
+    - pattern: kafka.network<type=(.+), name=(.+), request=(.+)><>(Count|Mean|OneMinuteRate)
+      name: kafka_network_$1_$2_$4
+      type: GAUGE
+      labels:
+        request: "$3"
+    
+    # Log metrics
+    - pattern: kafka.log<type=(.+), name=(.+), topic=(.+), partition=(.+)><>Value
+      name: kafka_log_$1_$2
+      type: GAUGE
+      labels:
+        topic: "$3"
+        partition: "$4"
+    
+    # Replication metrics
+    - pattern: kafka.server<type=ReplicaManager, name=(.+)><>(Value|Mean)
+      name: kafka_server_replicamanager_$1
+      type: GAUGE
+    
+    # Under-replicated partitions (중요!)
+    - pattern: kafka.server<type=ReplicaManager, name=UnderReplicatedPartitions><>Value
+      name: kafka_server_replicamanager_underreplicated_partitions
+      type: GAUGE
+    
+    # ISR metrics
+    - pattern: kafka.server<type=ReplicaManager, name=IsrShrinksPerSec><>OneMinuteRate
+      name: kafka_server_replicamanager_isr_shrinks_per_sec
+      type: GAUGE
+    
+    - pattern: kafka.server<type=ReplicaManager, name=IsrExpandsPerSec><>OneMinuteRate
+      name: kafka_server_replicamanager_isr_expands_per_sec
+      type: GAUGE
