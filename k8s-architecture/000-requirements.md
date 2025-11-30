@@ -13,6 +13,7 @@
 - 모니터링: Promethus + Grafana
 - 로깅: OpenSearch
 - CI/CD: Bitbucket, Jenkins, ArgoCD (외부)
+- 인증: Keyclaok (외부)
 
 ## 클러스터 예상 사용 패턴
 - 4개의 서비스(팀)는 엄격하게 namespace로 분리
