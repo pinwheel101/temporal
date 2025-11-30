@@ -1,3 +1,98 @@
+좋은 제안이자 날카로운 질문입니다. 특히 네트워크 구성 변경 제안은 빅데이터 워크로드의 특성을 아주 잘 파악하신 \*\*"신의 한 수"\*\*가 될 수 있습니다.
+
+확정해주신 방향을 바탕으로 \*\*기술적 타당성 검토(Feasibility Check)\*\*와 **구체적인 구현 논리**를 정리해 드립니다.
+
+-----
+
+### 1\. 네트워크 재설계: 2-Port (Mgmt/Svc) + 4-Port (Data) 구성
+
+제안하신 대로 NIC1(2-Port)을 일반 망으로, NIC2+NIC3(4-Port)를 데이터 고속도로로 묶는 것은 **매우 훌륭한 전략**입니다.
+
+  * **변경안 구성도:**
+
+      * **Bond0 (NIC 1, 2-Ports):** **`Management` + `Service(Ingress)`**
+          * Kubernetes API 통신, SSH 접속, 외부 사용자 트래픽 처리.
+          * 대역폭: 20G/50G (충분함).
+      * **Bond1 (NIC 2 + NIC 3, 4-Ports):** **`Data Plane` + `Storage`**
+          * **Pod-to-Pod 통신 (Cilium VXLAN/Geneve)**, Spark Shuffle, Kafka Replication, Isilon/MinIO 스토리지 트래픽.
+          * 대역폭: 40G\~100G (매우 강력함).
+
+  * **👍 장점:**
+
+      * **East-West 트래픽 최적화:** 빅데이터 클러스터 트래픽의 80% 이상은 노드 간 데이터 이동(East-West)입니다. 4개 포트를 LACP(802.3ad)로 묶으면 대역폭 병목을 거의 완벽하게 해소할 수 있습니다.
+      * **물리적 격리:** 사용자가 접속하는 경로(Bond0)와 데이터가 쏟아지는 경로(Bond1)가 물리적으로 분리되어, 데이터 폭주 시에도 SSH 접속이나 대시보드가 먹통이 되는 현상을 막을 수 있습니다.
+
+  * **⚠️ 주의사항 (네트워크 팀 전달 사항):**
+
+      * 스위치에서 **4개 포트를 하나의 LACP 그룹**으로 묶어줘야 합니다.
+      * 이중화(Redundancy)를 위해 NIC2와 NIC3가 서로 다른 스위치에 연결된다면, 스위치 간 **MLAG (Multi-Chassis Link Aggregation)** 설정이 필수입니다.
+
+-----
+
+### 2\. 스토리지: 왜 HW RAID0 대신 LVM Striping인가?
+
+"HW RAID 카드 없이 OS 레벨에서 묶는 이유"는 최신 NVMe의 특성과 쿠버네티스 운영 효율성 때문입니다.
+
+1.  **병목 현상 방지 (NVMe 속도 보장):**
+      * NVMe SSD는 PCIe 버스에 직접 연결되어 엄청난 속도를 냅니다.
+      * 전통적인 HW RAID 카드를 거치게 되면, **RAID 컨트롤러 자체가 병목**이 되어 NVMe의 제 속도를 못 내는 경우가 많습니다. CPU가 직접 처리하는 SW RAID(LVM)가 오히려 더 빠릅니다.
+2.  **TopoLVM과의 호환성:**
+      * 우리가 사용할 `TopoLVM`이나 `LVM-LocalPV`는 리눅스의 \*\*Volume Group (VG)\*\*을 인식하여 작동합니다.
+      * HW RAID를 쓰면 OS는 이걸 '하나의 디스크'로만 봅니다. 어차피 그 위에 LVM을 또 깔아야 합니다. 불필요한 레이어가 추가되는 셈입니다.
+3.  **유연성:**
+      * 나중에 디스크 하나가 고장 났을 때나 구성을 바꾸고 싶을 때, 서버를 리부팅하고 BIOS에 들어갈 필요 없이 리눅스 커맨드로 해결 가능합니다.
+
+> **결론:** NVMe 3.84T 2장을 \*\*LVM Striping (Linear가 아닌 Stripe 모드)\*\*으로 묶어서 `TopoLVM`에 통째로 던져주는 구성으로 확정하겠습니다.
+
+-----
+
+### 3\. 멀티테넌시: 옵션 A(공유) → 옵션 B(격리) 점진적 적용
+
+"일단 공유해서 쓰고, 문제 생기면 격리한다"는 **비용 효율적인 접근**입니다. 다만, 프로덕션 환경이므로 안전장치 하나는 꼭 걸고 가야 합니다.
+
+  * **전략:** `Shared Node Pool` (모든 노드 공유)
+  * **리스크:** "시끄러운 이웃" (예: B팀 Spark가 CPU를 다 써서 A팀 Kafka가 응답 불가)
+  * **안전장치 (Mandatory):**
+    1.  **PriorityClass 설정:**
+          * Kafka, Monitoring, Ingress 같은 중요 파드에는 `Priority: System-Critical` 또는 `High`를 부여합니다.
+          * Spark 같은 배치 작업은 `Priority: Low`를 부여합니다.
+          * 자원이 부족하면 쿠버네티스가 알아서 **Spark 파드를 먼저 죽이고(Preempt)** Kafka를 살립니다.
+    2.  **엄격한 ResourceQuota:**
+          * 초기에는 팀별 요청량(Request)의 합이 노드 전체 자원의 80%를 넘지 않도록 보수적으로 설정합니다.
+
+> **이행 계획:** 초기 구축은 A안으로 진행하되, Kubespray 설정 파일(Inventory)에서 노드 그룹(kube\_node)을 정의할 때, 추후 분리가 쉽도록 \*\*논리적인 그룹핑(Group naming)\*\*만 미리 해두겠습니다.
+
+-----
+
+### 🏛️ 확정된 아키텍처 요약 (Blueprint)
+
+지금까지의 의사결정을 바탕으로 구축될 클러스터의 청사진입니다.
+
+| 구분 | 결정 사항 | 상세 내용 |
+| :--- | :--- | :--- |
+| **Node Role** | Control Plane (5) / Worker (185) | etcd 안정성 위해 마스터 5대 구성 |
+| **OS** | **RHEL 10** | 최신 OS, 호환성 체크 필수 |
+| **Network** | **2-Port Bond (Mgmt/Svc) + 4-Port Bond (Data)** | **Bond0:** API, Ingress (VLAN X)<br>**Bond1:** Pod Network, Storage (VLAN Y) |
+| **CNI** | **Cilium (BGP Mode)** | Kube-proxy Replacement 활성화<br>ToR 스위치와 BGP Peering |
+| **Storage** | **LVM Striping + TopoLVM** | NVMe 2장을 1개의 VG로 Stripe 구성<br>고성능 Local PV 제공 |
+| **Multi-tenancy**| **Soft Isolation (Namespace)** | PriorityClass로 중요 워크로드 보호<br>추후 노드 라벨링으로 물리적 격리 전환 가능 |
+
+-----
+
+### 🚀 Next Step: Kubespray 인벤토리 설계
+
+이제 코드 레벨로 넘어가기 직전 단계인 \*\*"인벤토리 변수(Variable) 설계"\*\*를 진행해도 될까요?
+
+진행을 위해 **네트워크 팀에 요청할 IP 할당 계획**이 필요합니다. 아래 정보를 가상으로라도 정해주시거나, 가이드를 요청하시면 제가 **표준 IP 설계안**을 제안해 드릴 수 있습니다.
+
+1.  **노드 IP 대역:** (예: 10.10.10.0/24 - Bond0용)
+2.  **서비스 VIP 대역 (LoadBalancer):** (예: 10.10.20.0/24 - BGP로 광고할 대역)
+3.  **Pod CIDR (내부망):** (예: 172.16.0.0/16 - Cilium 내부용)
+4.  **Service CIDR (내부망):** (예: 10.233.0.0/18 - K8s Service용)
+
+**표준 설계안을 제안해 드릴까요, 아니면 정해진 대역이 있으신가요?**
+
+---
 매우 중요한 질문입니다. 데이터 흐름(Traffic Flow)을 명확히 하지 않으면, **외부에서 데이터를 끌어올 때(Download)** 네트워크 병목이 발생해 정작 중요한 서비스가 느려질 수 있기 때문입니다.
 
 결론부터 말씀드리면, **데이터 플레인(Data Plane) 전용 인터페이스**를 사용해야 합니다.
