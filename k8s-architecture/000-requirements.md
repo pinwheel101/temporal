@@ -12,6 +12,7 @@
 - 어플리케이션: Airflow, Spark, Trino, Flink, Kafka 운용. 추후 StarRocks 검토
 - 모니터링: Promethus + Grafana
 - 로깅: OpenSearch
+- CI/CD: Bitbucket, Jenkins, ArgoCD (외부)
 
 ## 클러스터 예상 사용 패턴
 - 4개의 서비스(팀)는 엄격하게 namespace로 분리
