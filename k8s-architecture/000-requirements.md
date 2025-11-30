@@ -8,7 +8,7 @@
 - 스토리지: 외부 MinIO/Iceberg (Object Storage), Dell Isilon NAS 가용
 
 ## 어플리케이션
-- Ingress: Cilium
+- Ingress/LB: Cilium
 - 어플리케이션: Airflow, Spark, Trino, Flink, Kafka 운용. 추후 StarRocks 검토
 - 모니터링: Promethus + Grafana
 - 로깅: OpenSearch
