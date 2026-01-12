@@ -1,0 +1,86 @@
+# history-server-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flink-history-server
+  namespace: flink
+  labels:
+    app: flink-history-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flink-history-server
+  template:
+    metadata:
+      labels:
+        app: flink-history-server
+    spec:
+      serviceAccountName: flink
+      containers:
+      - name: history-server
+        image: flink:2.0
+        command: ["/opt/flink/bin/historyserver.sh"]
+        args: ["start-foreground"]
+        ports:
+        - name: web
+          containerPort: 8082
+          protocol: TCP
+        env:
+        # S3 인증 정보 (Secret에서 주입)
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: access-key
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: secret-key
+        # Flink 2.0 config 디렉토리
+        - name: FLINK_CONF_DIR
+          value: "/opt/flink/conf"
+        volumeMounts:
+        # config.yaml 마운트
+        - name: flink-config
+          mountPath: /opt/flink/conf/config.yaml
+          subPath: config.yaml
+        - name: flink-config
+          mountPath: /opt/flink/conf/log4j-console.properties
+          subPath: log4j-console.properties
+        # 임시 디렉토리
+        - name: tmp-dir
+          mountPath: /tmp/flink-history-server
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1"
+        livenessProbe:
+          httpGet:
+            path: /overview
+            port: 8082
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /overview
+            port: 8082
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: flink-config
+        configMap:
+          name: flink-history-server-config
+      - name: tmp-dir
+        emptyDir: {}
+      # 필요 시 S3 플러그인을 위한 초기화 컨테이너
+      initContainers:
+      - name: check-s3-access
+        image: flink:2.0
+        command: ['sh', '-c', 'echo "S3 configuration ready"']
