@@ -1,0 +1,46 @@
+# history-server-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flink-history-server-config
+  namespace: flink
+  labels:
+    app: flink-history-server
+data:
+  # Flink 2.0은 config.yaml 사용 (표준 YAML 1.2 형식)
+  config.yaml: |
+    # History Server 설정
+    historyserver:
+      archive:
+        fs:
+          # JobManager가 저장하는 위치와 동일해야 함
+          dir: "s3://my-bucket/flink/completed-jobs"
+          # Archive 새로고침 간격 (ms)
+          refresh-interval: 10000
+      web:
+        port: 8082
+        address: "0.0.0.0"
+        tmpdir: "/tmp/flink-history-server"
+      # 보관할 최대 job 수 (-1: 무제한)
+      archive:
+        retained-jobs: -1
+    
+    # S3 접근 설정
+    s3:
+      access-key: "${AWS_ACCESS_KEY_ID}"
+      secret-key: "${AWS_SECRET_ACCESS_KEY}"
+      endpoint: "s3.amazonaws.com"
+      path-style-access: false
+
+  # 로깅 설정
+  log4j-console.properties: |
+    rootLogger.level = INFO
+    rootLogger.appenderRef.console.ref = ConsoleAppender
+    
+    appender.console.name = ConsoleAppender
+    appender.console.type = Console
+    appender.console.layout.type = PatternLayout
+    appender.console.layout.pattern = %d{yyyy-MM-dd HH:mm:ss,SSS} %-5p %-60c %x - %m%n
+    
+    logger.flink.name = org.apache.flink
+    logger.flink.level = INFO
