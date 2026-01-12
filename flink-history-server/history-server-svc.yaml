@@ -1,0 +1,40 @@
+# history-server-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: flink-history-server
+  namespace: flink
+  labels:
+    app: flink-history-server
+spec:
+  type: ClusterIP
+  ports:
+  - name: web
+    port: 8082
+    targetPort: 8082
+    protocol: TCP
+  selector:
+    app: flink-history-server
+---
+# 외부 접근용 Ingress
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: flink-history-server-ingress
+  namespace: flink
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: flink-history.your-domain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: flink-history-server
+            port:
+              number: 8082
