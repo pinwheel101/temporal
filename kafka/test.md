@@ -1,6 +1,7 @@
 빠른 테스트를 위한 전체 플로우를 제공하겠습니다.
 1. Kafka 토픽 생성
 
+```
 # test-topics.yaml
 apiVersion: kafka.strimzi.io/v1beta2
 kind: KafkaTopic
@@ -31,11 +32,13 @@ spec:
 
 kubectl apply -f test-topics.yaml
 kubectl get kt -n kafka
+```
 
 
 2. 스키마 등록 스크립트
 2.1 Avro 스키마 등록
 
+```
 # avro-schema.json
 cat > /tmp/avro-schema.json <<'EOF'
 {
@@ -62,10 +65,11 @@ curl -X POST http://localhost:8081/apis/registry/v3/groups/default/artifacts \
   -d @/tmp/avro-schema.json
 
 echo "Avro schema registered successfully!"
-
+```
 
 2.2 Protobuf 스키마 등록
 
+```
 # protobuf-schema.proto
 cat > /tmp/protobuf-schema.proto <<'EOF'
 syntax = "proto3";
@@ -89,7 +93,7 @@ curl -X POST http://localhost:8081/apis/registry/v3/groups/default/artifacts \
   --data-binary @/tmp/protobuf-schema.proto
 
 echo "Protobuf schema registered successfully!"
-
+```
 
 2.3 등록된 스키마 확인
 
@@ -104,6 +108,7 @@ curl http://localhost:8081/apis/registry/v3/groups/default/artifacts/test-protob
 3. 메시지 전송 스크립트
 3.1 Python 환경 준비
 
+```
 # producer pod 생성
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
@@ -130,10 +135,11 @@ kubectl wait --for=condition=ready pod/kafka-producer-test -n kafka --timeout=60
 kubectl exec -it kafka-producer-test -n kafka -- bash -c "
 pip install kafka-python avro confluent-kafka fastavro protobuf
 "
-
+```
 
 3.2 Avro 메시지 전송 스크립트
 
+```
 kubectl exec -it kafka-producer-test -n kafka -- python3 <<'PYTHON'
 from confluent_kafka import Producer
 from confluent_kafka.serialization import SerializationContext, MessageField
@@ -212,10 +218,11 @@ for user in users:
 producer.flush()
 print("\n✅ All Avro messages sent successfully!")
 PYTHON
-
+```
 
 3.3 Protobuf 메시지 전송 스크립트
 
+```
 kubectl exec -it kafka-producer-test -n kafka -- python3 <<'PYTHON'
 from confluent_kafka import Producer
 from confluent_kafka.serialization import SerializationContext, MessageField
@@ -264,7 +271,7 @@ for product in products:
 producer.flush()
 print("\n✅ All Protobuf messages sent successfully!")
 PYTHON
-
+```
 
 4. 더 간단한 방법: Kafka 네이티브 콘솔 프로듀서
 
@@ -281,6 +288,7 @@ EOF
 
 5. 올인원 빠른 테스트 스크립트
 
+```
 #!/bin/bash
 # quick-test.sh
 
@@ -363,6 +371,7 @@ kill $PF_PID 2>/dev/null
 
 chmod +x quick-test.sh
 ./quick-test.sh
+```
 
 
 6. Kafka-UI에서 확인
